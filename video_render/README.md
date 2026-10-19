@@ -2,7 +2,7 @@
 
 基于 [VideoX-Fun](https://github.com/aigc-apps/VideoX-Fun) 的 **Wan2.2-Fun-5B-Control**，做两件事：
 
-1. **Finetune**：用 pose（DWPose）视频 + 参考图，训练 pose 控制 LoRA。
+1. **LoRA finetune**：基座模型全部冻结，只训练 LoRA 参数，让模型学会 pose（DWPose）视频 + 参考图的控制。
 2. **Streaming inference**：按 chunk 流式生成，每轮输出一小段新帧，并复用末尾几帧作为下一轮的条件，从而生成任意长的视频。
 
 > 仓库里只有代码，不含图片、视频、模型权重和数据。上游原版说明见 [README_VideoX-Fun.md](README_VideoX-Fun.md)。
@@ -24,7 +24,7 @@ pip install -r requirements.txt
 
 脚本中有不少绝对路径（`/data/pdai/...`，包括 conda 环境、数据目录和 `cd`），换机器后需要自行替换。
 
-## 2. Finetune：pose 控制 LoRA
+## 2. LoRA finetune：pose 控制
 
 目录：`scripts/wan2.2_fun/vimogen_lora/`，训练入口是 `scripts/wan2.2_fun/train_control_lora.py`。
 
@@ -45,7 +45,9 @@ python scripts/wan2.2_fun/vimogen_lora/build_meta.py
 
 ### 2.2 训练
 
-单机多卡直接运行：
+只训练 LoRA，不训练整个模型：VAE、text encoder 和 transformer 都是冻结的，可训练参数只有 LoRA 的 A/B 矩阵，所以显存和产物都小得多，产物就是一个 `.safetensors` LoRA 文件。推理时把它合并到基座模型上即可。
+
+单机多卡运行：
 
 ```bash
 MAX_STEPS=3000 NUM_GPU=4 META_DIR=<meta 目录> \
