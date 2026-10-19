@@ -1,3 +1,13 @@
+## Ardy motion prior
+
+第一阶段基于 ARDY 模型实现可交互的 Motion Generation。
+
+本项目在原版 ARDY 的基础上进行了扩展，保留了原有的 UI 交互控制功能，并新增了 ARDY Motion 到 DW-Pose 的转换、UI Dragging 交互控制等功能。
+
+通过与后续的 Video Renderer 模块结合，实现从交互式 Motion Generation 到 Video Generation 的完整流程，以验证 Interactive Generative Video Model 的可行性。
+
+本 README 基于原版 ARDY 的 README.md 修改，主要介绍扩展功能及其使用方法。
+
 # ARDY: Autoregressive Diffusion with Hybrid Representation for Interactive Human Motion Generation
 
 <p align="center">
