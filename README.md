@@ -33,7 +33,7 @@ interactive_video_stage1/
 ├── ardy_m/                 # Interactive motion generation
 │   └── README.md
 │
-├── video_renderer/       # Pose-conditioned video rendering
+├── video_render/       # Pose-conditioned video rendering
 │   └── README.md
 │
 └── README.md               # Overall pipeline and project introduction
