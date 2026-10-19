@@ -19,6 +19,7 @@ import numpy as np
 import torch
 import viser
 
+from ardy.prompt_schedule import PromptSchedule
 from ardy.skeleton import (
     CoreSkeleton27,
     G1Skeleton34,
@@ -80,6 +81,7 @@ def load_motion(path: Path) -> dict:
         joints_rot = joints_rot if joints_rot is not None else fk_rot
 
     foot_contacts = get("foot_contacts")
+    prompt_schedule = PromptSchedule.from_npz_arrays(data, num_frames=int(joints_pos.shape[0]))
     return {
         "joints_pos": joints_pos,
         "joints_rot": joints_rot,
@@ -88,6 +90,7 @@ def load_motion(path: Path) -> dict:
         "nbjoints": joints_pos.shape[1],
         "fps": float(data["fps"]) if "fps" in data else 20.0,
         "text": str(data["text"]) if "text" in data else "",
+        "prompt_schedule": prompt_schedule,
     }
 
 
@@ -157,6 +160,15 @@ def main():
         frame_idx = min(frame_idx, motion["num_frames"] - 1)
         contacts = motion["foot_contacts"][frame_idx] if motion["foot_contacts"] is not None else None
         state["character"].set_pose(motion["joints_pos"][frame_idx], motion["joints_rot"][frame_idx], contacts)
+        prompt_schedule = motion["prompt_schedule"]
+        active_prompt = prompt_schedule.text_at(frame_idx) if prompt_schedule is not None else motion["text"]
+        if active_prompt == motion.get("displayed_prompt"):
+            return
+        motion["displayed_prompt"] = active_prompt
+        gui_info.content = (
+            f"**Prompt:** {active_prompt}  \n"
+            f"**File:** {motion['file'].name} — {motion['num_frames']} frames @ {motion['fps']:g} fps"
+        )
 
     def show_file(path: Path) -> None:
         motion = load_motion(path)
@@ -164,12 +176,10 @@ def main():
             state["character"].clear()
             state["character"] = create_character(server, motion["nbjoints"])
         state["motion"] = motion
+        motion["file"] = path
+        motion["displayed_prompt"] = None
         gui_frame.max = motion["num_frames"] - 1
         gui_frame.value = 0
-        gui_info.content = (
-            f"**Prompt:** {motion['text']}  \n"
-            f"**File:** {path.name} — {motion['num_frames']} frames @ {motion['fps']:g} fps"
-        )
         show_frame(0)
 
     @gui_frame.on_update

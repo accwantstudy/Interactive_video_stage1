@@ -32,6 +32,7 @@ pip install -e ".[all]"
 - **Partial installs:** the optional dependency groups can also be installed individually:
   - `pip install -e .` — core model inference only
   - `pip install -e ".[demo]"` — adds the interactive demo (viser, gradio)
+  - `pip install -e ".[video]"` — adds headless skeleton/mesh rendering; FFmpeg must also be on `PATH`
   - `pip install -e ".[trt]"` — adds TensorRT acceleration
 - **TensorRT requirements:** the `[trt]` extra requires an NVIDIA driver >= 525 (CUDA 12-capable — the CUDA runtime itself is bundled via pip) and access to `pypi.nvidia.com` during install. On setups that don't meet these requirements, install `.[demo]` instead and select a non-TensorRT acceleration mode in the demo.
 
@@ -199,6 +200,8 @@ More detailed information about the interactive demo is available in the [GUI Re
 #### Tab: IO
 
 - **Session Export/Load** - Export/load the full session (motion and/or constraints) to/from a file.
+- **Export Motion NPZ** - Save generated motion and its prompt timeline in the standard format accepted by `scripts/visualize.py` and `scripts/export_video.py`.
+- **DW-Pose Video** - Export generated motion directly as a front-facing, full-body pose animation on black; choose dimensions, hide the head joint, or follow the character.
 - **Root Constraints** - Load/save root constraints to a file.
 - **Scene** - Load a scene file and adjust mesh transform/translation.
 - **Capture Viewport Image** - Capture the current viewport image and save it to a file.
@@ -227,9 +230,17 @@ python scripts/generate.py "A person jumps." --model core --duration 8.0 --seed 
 
 # Multiple samples (writes a folder outputs/waves/ with waves_00.npz, waves_01.npz, ...)
 python scripts/generate.py "A person waves." --model g1 --num_samples 4 --output waves
+
+# Switch prompts at 3s, 6s, and 9s using the responsive core8 model
+python scripts/generate.py "A person walks." --model core8 --duration 12 \
+    --prompt-switch 3 "A person runs." \
+    --prompt-switch 6 "A person sidesteps." \
+    --prompt-switch 9 "A person walks backward." \
+    --output prompt_switch
 ```
 
 Each `.npz` contains the generated motion — `posed_joints` (world-space joint positions, `[T, J, 3]`), local/global joint rotations, root positions, and foot contacts — plus the `fps` and the prompt `text`.
+Prompt-switched files additionally contain `prompt_texts`, `prompt_start_frames`, and `prompt_end_frames` (exclusive). The browser visualizer and `--show-text` video overlay display the prompt active at each frame.
 
 To play back a generated motion in the browser (same viser viewport as the interactive demo), use [`scripts/visualize.py`](scripts/visualize.py):
 
@@ -246,14 +257,105 @@ Most useful flags:
 |------|---------|
 | `--model` | Model nickname `core`/`g1` (optionally with horizon, e.g. `core8`) or full folder name. Default: `core`. |
 | `--duration` | Length in seconds (default 5.0). |
+| `--prompt-switch SECONDS PROMPT` | Change the prompt at a token-aligned time; repeat the flag for multiple switches. Currently cannot be combined with `--constraints`. |
 | `--num_samples` | Number of samples; when >1, writes a numbered folder. |
 | `--seed` | Fix the random seed for reproducible output. |
 | `--output` | Output stem (single sample → one file; multiple → a folder). Bare names go under `outputs/`; pass a path (e.g. `results/jump`) to write elsewhere. |
-| `--history_frames` | History visible to each autoregressive step. Default: the longest history fitting the model's trained 10s window — keep it unless you want faster prompt adaptation. |
+| `--history_frames` | History visible to each autoregressive step. Defaults to one motion token, matching the demo (4 frames for Core); overrides must be positive multiples of the model's token size. |
+| `--cfg_weight` | Classifier-free guidance scale. Pass one value for text guidance only, or two values for text and constraint guidance (default: `2.0 2.0`). |
 | `--constraints` | Path to a saved kinematic-constraint list. |
-| `--no-postprocess` | Don't apply motion post-processing to reduce foot skating and hit constraints. |
+| `--postprocess` / `--no-postprocess` | Enable or disable motion post-processing to reduce foot skating and hit constraints. Default: off, matching the demo. Always disabled for G1. |
 
 > Tip: if you generate repeatedly, start the standalone text-encoder service in the background first (`python scripts/run_text_encoder_server.py`) so each run connects to it instead of loading the LLM2Vec model in-process every time.
+
+## Video Export
+
+There are two video paths:
+
+1. **Headless skeleton, mesh, or DW-Pose video** — deterministic, scriptable, and does not need a browser or GPU.
+2. **Viewport video** — available in the motion editor below; captures the current browser camera and can include the skinned mesh, skeleton, or both.
+
+For headless skeleton, mesh, and DW-Pose MP4s:
+
+~~~bash
+python scripts/export_video.py outputs/output.npz
+python scripts/export_video.py outputs/output.npz --render-mode dwpose
+python scripts/export_video.py outputs/output.npz --render-mode dwpose --hide-head \
+    --follow-root --width 720 --height 1280 --output videos/pose_portrait.mp4
+python scripts/export_video.py outputs/output.npz \
+    --render-mode mesh --face-front --follow-root \
+    --output videos/output_mesh.mp4
+python scripts/export_video.py outputs/output.npz \
+    --output videos/output.mp4 \
+    --azimuth 120 --elevation 20 --follow-root \
+    --width 1920 --height 1080
+~~~
+
+The input is the NPZ written by scripts/generate.py. The default output is beside the input with an .mp4 extension. Mesh mode uses the packaged Core or SOMA skinned body, or the articulated G1 STL geometry. It deforms and rasterizes the mesh directly on CPU, so no browser, display server, or GPU is needed. The exporter uses FFmpeg (available on `PATH`), streams encoded frames, and accepts MP4 or WebM output.
+
+Useful camera/render arguments:
+
+| Flag | Meaning |
+|------|---------|
+| --render-mode skeleton / mesh / dwpose | Render the 3D skeleton, animated mesh, or a black-background DW-Pose-style body animation. |
+| --hide-head | DW-Pose: omit the head point and its connecting edge; keep the neck/body. |
+| --face-front / --no-face-front | All modes: align to the first exported pose or use world-space angles. Default: on for DW-Pose, off for skeleton/mesh. |
+| --padding | DW-Pose: margin on each side as a fraction of image size (default 0.08). |
+| --azimuth / --elevation | Orbit camera angles in degrees. |
+| --distance / --fov | Explicit camera distance and vertical field of view; distance auto-fits by default. |
+| --target X Y Z | Use a fixed look-at point. |
+| --follow-root | Follow the character along a long path. |
+| --start-frame / --end-frame | Render an exclusive frame range. |
+| --fps | Playback FPS override; defaults to the motion's native FPS. |
+| --trail-seconds | Opt into a root trajectory trail of this duration; disabled by default. |
+| --no-grid / --show-text | Hide the ground grid or opt into the prompt/time overlay. |
+| --mesh-color R G B | Set the mesh's base RGB color. |
+| --mesh-max-faces | G1-only CPU face budget; increase it for more detail at slower render speed. |
+
+DW-Pose mode projects the existing 3D motion into 2D; it does not run a pose detector or need additional model weights. It uses the usual body colors, circular joints, and oval limbs on pure black. Overlapping limbs and joints use their camera-space depth, so the nearer leg or arm stays in front at crossings. Core and SOMA map to shoulders, elbows, wrists, hips, knees, and ankles, with a shoulder-midpoint neck and an optional `Head` joint used as a head proxy (not an estimated nose). Face landmarks, eyes/ears, fingers, toes, and extra spine joints are omitted. G1 maps its corresponding limb joints and omits the unavailable head.
+
+Skeleton and mesh exports also support `--face-front`. This starts with a level front view of the first exported frame and keeps the viewing angle fixed for the rest of the clip. `--azimuth` then adds an offset to that front view; `--elevation` overrides the default zero elevation. It works with `--follow-root` and `--start-frame`. Without `--face-front`, skeleton and mesh retain their default 45° azimuth / 15° elevation.
+
+The default DW-Pose camera faces the hip heading at the **first exported frame**, at zero elevation. Its orientation stays fixed afterward, preserving turns, rolls, and sideways movement. `--azimuth` adds an offset to that initial front view; `--no-face-front --azimuth 90` selects an absolute world view. The camera automatically fits every source joint over the selected frame range, with a constant distance and padding to keep jumps and extended limbs in frame in landscape or portrait output. `--follow-root` centers the moving character without rotating the camera. A manually supplied `--distance` overrides auto-fit and may crop the pose. `--hide-head` leaves the framing unchanged. DW-Pose output has no grid, text, or trajectory overlays.
+
+MP4 requires FFmpeg with `libx264`; WebM requires `libvpx-vp9` (the cluster's current FFmpeg lacks VP9, so use MP4 there).
+
+DW-Pose's default output is `INPUT_dwpose.mp4`, preserving the usual `INPUT.mp4` render. FPS defaults to the NPZ's native rate; `--fps` changes playback speed without resampling. In the interactive demo, open **IO → DW-Pose Video**, choose dimensions and **Hide Head Joint** / **Follow Character**, then click **Export DW-Pose Video**. It exports a snapshot in the background to the server path, with numbered files for multiple samples.
+
+Run python scripts/export_video.py --help for the complete interface.
+
+## Interactive Motion Editor
+
+Launch the standalone editor with any generated ARDY NPZ:
+
+~~~bash
+python scripts/edit_motion.py outputs/output.npz
+# Then open http://localhost:2335
+~~~
+
+python scripts/edit_motion.py outputs/Editing workflow:
+
+1. Pause on the frame that should hit the desired pose.
+2. Click a blue joint in the 3D view, or select its name in **Selected joint**.
+3. Drag the orange translation gizmo. The joint's ancestor chain is solved with inverse kinematics, so bones stay connected and keep their exact lengths.
+4. Adjust **Body influence**:
+   - **Limb** changes the nearby limb chain and preserves most of the body.
+   - **Body** lets torso joints help.
+   - **Whole body** uses the complete ancestor chain; **Whole-body root reach** can additionally translate the root for otherwise unreachable targets.
+5. Adjust **Ease in**, **Hold**, and **Ease out** to control how the edit develops over time. These use a smoothstep envelope and solve every affected frame as one batch.
+6. Use **Commit**, **Undo**, or **Reset**, then save a new NPZ. Unknown source fields are retained and all FK-derived position/rotation fields are updated.
+
+The editor is deterministic and model-independent, so it is responsive on CPU and does not require checkpoint loading. It directly changes the motion file using temporally blended CCD inverse kinematics. For a mesh video, set **Show mesh** / **Show skeleton**, arrange the browser camera, and click **Export current viewport**.
+
+The editor limits numerical libraries to one compute thread by default. This avoids OpenMP thread-exhaustion errors on shared login nodes and is typically faster for the small batched IK solve. To opt into more threads, launch it with `ARDY_EDITOR_THREADS=4 python scripts/edit_motion.py ...`.
+
+The default output names are INPUT_edited.npz and INPUT_edited.mp4. Use --output and --port to change them:
+
+~~~bash
+python scripts/edit_motion.py outputs/output.npz \
+    --output results/hand_raise_edited.npz \
+    --port 2440
+~~~
 
 ---
 

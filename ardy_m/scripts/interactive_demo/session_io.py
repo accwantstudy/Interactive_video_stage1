@@ -181,6 +181,96 @@ class SessionIOMixin:
             traceback.print_exc()
             return False
 
+    def export_motion_npz(self, client_id: int, filepath: str) -> list[str]:
+        """Export generated motion to standard NPZ files understood by ARDY tools."""
+        if not self.client_active(client_id):
+            return []
+        session = self.client_sessions[client_id]
+        if session.motion_tensor is None or session.motion_rep is None:
+            print("[Motion NPZ Export] No generated motion is available")
+            return []
+
+        try:
+            output_path = filepath if filepath.lower().endswith(".npz") else f"{filepath}.npz"
+            output_dir = os.path.dirname(output_path)
+            os.makedirs(output_dir if output_dir else ".", exist_ok=True)
+
+            with session.motion_tensor_lock:
+                motion_tensor = session.motion_tensor.detach().clone()
+            with torch.no_grad():
+                motion_unnormalized = session.motion_rep.unnormalize(motion_tensor)
+                output = session.motion_rep.inverse(motion_unnormalized, is_normalized=False)
+
+            n_samples = int(output["posed_joints"].shape[0])
+            num_frames = int(output["posed_joints"].shape[1])
+            client = session.client
+            prompt_by_start = {}
+            if hasattr(client, "timeline"):
+                for prompt in client.timeline._prompts.values():
+                    start = int(prompt.start_frame)
+                    if 0 <= start < num_frames:
+                        prompt_by_start[start] = str(prompt.text)
+            if not prompt_by_start or min(prompt_by_start) > 0:
+                prompt_by_start[0] = session.gui_elements.gui_prompt_text.value
+            starts = tuple(sorted(prompt_by_start))
+            texts = tuple(prompt_by_start[start] for start in starts)
+            ends = (*starts[1:], num_frames)
+            prompt_schedule = PromptSchedule(texts=texts, start_frames=starts, end_frames=ends)
+
+            stem, _ = os.path.splitext(output_path)
+            saved_paths = []
+            for sample_idx in range(n_samples):
+                sample_path = output_path if n_samples == 1 else f"{stem}_{sample_idx:02d}.npz"
+                arrays = {}
+                for key, value in output.items():
+                    value = value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
+                    arrays[key] = value[sample_idx] if value.ndim > 0 and value.shape[0] == n_samples else value
+                arrays["fps"] = np.asarray(session.model_fps)
+                arrays["text"] = np.asarray(prompt_schedule.summary())
+                arrays.update(prompt_schedule.to_npz_arrays())
+                np.savez(sample_path, **arrays)
+                saved_paths.append(sample_path)
+                print(f"[Motion NPZ Export] Saved {sample_path}")
+            return saved_paths
+        except Exception as error:
+            print(f"[Motion NPZ Export] Failed: {error}")
+            import traceback
+
+            traceback.print_exc()
+            return []
+
+    def export_motion_dwpose(
+        self, client_id: int, filepath: str, *, width: int = 1280, height: int = 720,
+        hide_head: bool = False, follow_root: bool = False,
+    ) -> list[str]:
+        """Render a snapshot of generated motion; leave the live session untouched."""
+        import tempfile
+        from pathlib import Path
+
+        from ardy.dwpose import export_dwpose_video
+        from ardy.motion_io import load_motion_npz
+        from ardy.video import OrbitCamera
+
+        path = Path(filepath)
+        if not path.suffix:
+            path = path.with_suffix(".mp4")
+        if path.suffix.lower() not in {".mp4", ".webm"}:
+            raise ValueError("DW-Pose output must end in .mp4 or .webm")
+        camera = OrbitCamera(azimuth_degrees=0, elevation_degrees=0, follow_root=follow_root)
+        saved = []
+        # Reuse the standard motion snapshot/decode path, including multi-sample
+        # sessions. Temporary NPZs are cleaned up even if video encoding fails.
+        with tempfile.TemporaryDirectory(prefix="ardy-dwpose-") as directory:
+            snapshots = self.export_motion_npz(client_id, str(Path(directory) / "motion.npz"))
+            if not snapshots:
+                raise ValueError("No motion could be exported. Generate motion first; check the console for details.")
+            for sample_idx, snapshot in enumerate(snapshots):
+                output = path if len(snapshots) == 1 else path.with_name(f"{path.stem}_{sample_idx:02d}{path.suffix}")
+                motion = load_motion_npz(snapshot, require_rotations=False)
+                export_dwpose_video(motion, output, width=width, height=height, camera=camera, hide_head=hide_head)
+                saved.append(str(output))
+        return saved
+
     def load_session(self, client_id: int, filepath: str):
         """Load generated motion, text prompts, and constraints from a pickle file."""
         if not self.client_active(client_id):

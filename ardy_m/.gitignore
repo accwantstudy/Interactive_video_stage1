@@ -150,6 +150,7 @@ out
 tmr_out
 .ruff_cache
 outputs
+/cluster/logs/*.out
 /debug
 /batch*.sh
 checkpoints

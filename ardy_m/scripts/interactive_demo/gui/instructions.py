@@ -103,6 +103,7 @@ INSTRUCTIONS_TAB_MD = f"""### What is this demo?
     ### Saving & loading (IO tab)
 
     - **Session**: save and restore motion + prompts + constraints (`.pkl`).
+    - **Motion NPZ**: export generated motion plus its prompt timeline for the CLI visualizer and video exporter.
     - **Root constraints**: save/load as JSON.
     - **Scene**: load a `.ply`/`.obj` environment mesh; capture the viewport to a PNG.
 

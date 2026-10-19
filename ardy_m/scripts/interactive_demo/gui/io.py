@@ -20,6 +20,28 @@ class GuiIOMixin:
                 )
                 g.gui_export_session_button = client.gui.add_button("Export Session")
                 g.gui_load_session_button = client.gui.add_button("Load Session")
+                g.gui_motion_npz_path = client.gui.add_text(
+                    "Motion NPZ Path",
+                    initial_value=f"outputs/demo_motion_{default_timestamp}.npz",
+                )
+                g.gui_export_motion_npz_button = client.gui.add_button("Export Motion NPZ", color="green")
+
+            with client.gui.add_folder("DW-Pose Video", expand_by_default=True):
+                client.gui.add_markdown(
+                    "Export a black-background body pose video, facing the first pose and fitting the full motion. "
+                    "Face and finger details are omitted. Files are saved on the server."
+                )
+                g.gui_dwpose_path = client.gui.add_text(
+                    "Pose Video Path", initial_value=f"outputs/demo_motion_{default_timestamp}_dwpose.mp4",
+                )
+                g.gui_dwpose_width = client.gui.add_number("Video Width", initial_value=1280, min=64, max=7680, step=2)
+                g.gui_dwpose_height = client.gui.add_number("Video Height", initial_value=720, min=64, max=4320, step=2)
+                g.gui_dwpose_hide_head = client.gui.add_checkbox("Hide Head Joint", initial_value=False)
+                g.gui_dwpose_follow_root = client.gui.add_checkbox(
+                    "Follow Character", initial_value=False,
+                    hint="Keep the character centered while preserving turns; useful for long walking paths",
+                )
+                g.gui_export_dwpose_button = client.gui.add_button("Export DW-Pose Video", color="green")
 
             # Root Constraints Group
             with client.gui.add_folder("Root Constraints", expand_by_default=True):
@@ -107,6 +129,63 @@ class GuiIOMixin:
                             auto_close_seconds=5.0,
                             color="red",
                         )
+
+            @g.gui_export_motion_npz_button.on_click
+            def _(event: viser.GuiEvent) -> None:
+                filepath = g.gui_motion_npz_path.value
+                saved_paths = self.export_motion_npz(client_id, filepath)
+                if event.client:
+                    if saved_paths:
+                        event.client.add_notification(
+                            title="Motion NPZ Exported",
+                            body=", ".join(saved_paths),
+                            auto_close_seconds=4.0,
+                            color="green",
+                        )
+                    else:
+                        event.client.add_notification(
+                            title="Motion NPZ Export Failed",
+                            body="Generate motion first; check the console for details.",
+                            auto_close_seconds=5.0,
+                            color="red",
+                        )
+
+            @g.gui_export_dwpose_button.on_click
+            def _(event: viser.GuiEvent) -> None:
+                if not self.client_active(client_id) or g.gui_export_dwpose_button.disabled:
+                    return
+                filepath = g.gui_dwpose_path.value
+                options = dict(
+                    width=int(g.gui_dwpose_width.value), height=int(g.gui_dwpose_height.value),
+                    hide_head=g.gui_dwpose_hide_head.value, follow_root=g.gui_dwpose_follow_root.value,
+                )
+                g.gui_export_dwpose_button.disabled = True
+                if event.client:
+                    event.client.add_notification(
+                        title="Exporting DW-Pose Video", body="Rendering the generated motion…",
+                        auto_close_seconds=3.0, color="blue",
+                    )
+
+                def export_thread():
+                    try:
+                        paths = self.export_motion_dwpose(client_id, filepath, **options)
+                        if event.client and self.client_active(client_id):
+                            event.client.add_notification(
+                                title="DW-Pose Video Exported", body=", ".join(paths),
+                                auto_close_seconds=8.0, color="green",
+                            )
+                    except Exception as error:
+                        print(f"[DW-Pose Export] Failed: {error}")
+                        if event.client and self.client_active(client_id):
+                            event.client.add_notification(
+                                title="DW-Pose Export Failed", body=str(error),
+                                auto_close_seconds=8.0, color="red",
+                            )
+                    finally:
+                        if self.client_active(client_id):
+                            g.gui_export_dwpose_button.disabled = False
+
+                threading.Thread(target=export_thread, daemon=True).start()
 
             @g.gui_load_session_button.on_click
             def _(event: viser.GuiEvent) -> None:

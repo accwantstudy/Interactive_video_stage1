@@ -39,6 +39,7 @@ from ardy.model.registry import (
 )
 from ardy.motion_rep import ArdyMotionRep
 from ardy.postprocess import post_process_motion
+from ardy.prompt_schedule import PromptSchedule
 from ardy.skeleton import (
     CoreSkeleton27,
     G1Skeleton34,
@@ -235,6 +236,17 @@ class GuiElements:
     gui_random_motion_button: viser.GuiInputHandle
     gui_waypoint_mode_checkbox: viser.GuiInputHandle[bool]
     gui_dense_root_checkbox: viser.GuiInputHandle[bool]
+    gui_session_file_path: viser.GuiInputHandle[str]
+    gui_export_session_button: viser.GuiInputHandle
+    gui_load_session_button: viser.GuiInputHandle
+    gui_motion_npz_path: viser.GuiInputHandle[str]
+    gui_export_motion_npz_button: viser.GuiInputHandle
+    gui_dwpose_path: viser.GuiInputHandle[str]
+    gui_dwpose_width: viser.GuiInputHandle[int]
+    gui_dwpose_height: viser.GuiInputHandle[int]
+    gui_dwpose_hide_head: viser.GuiInputHandle[bool]
+    gui_dwpose_follow_root: viser.GuiInputHandle[bool]
+    gui_export_dwpose_button: viser.GuiInputHandle
     gui_root_file_path: viser.GuiInputHandle[str]
     gui_load_root_button: viser.GuiInputHandle
     gui_save_root_button: viser.GuiInputHandle

@@ -54,6 +54,11 @@ demo = [
   "pandas>=2.0",
   "pillow>=9.0",
 ]
+# Headless skeleton and mesh video export (scripts/export_video.py).
+video = [
+  "pillow>=9.0",
+  "trimesh>=4.0",
+]
 # TensorRT acceleration (engine export at load time needs onnx).
 # NOTE: pinned exactly — TRT engine caches (engines/*.trt next to checkpoints)
 # only deserialize with the exact TensorRT version that built them.
@@ -62,7 +67,7 @@ trt = [
   "onnx>=1.16",
 ]
 all = [
-  "ardy[demo,trt]",
+  "ardy[demo,trt,video]",
 ]
 
 [tool.setuptools]
