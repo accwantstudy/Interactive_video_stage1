@@ -10,7 +10,7 @@
 ## 1. 环境
 
 ```bash
-conda create -n VideoX_Fun python=3.10 -y && conda activate VideoX_Fun
+conda create -n VideoX_Fun python=3.11 -y && conda activate VideoX_Fun
 pip install -r requirements.txt
 ```
 
@@ -41,7 +41,7 @@ python scripts/wan2.2_fun/vimogen_lora/build_meta.py
 - 只保留 RGB、pose、文本三者齐全的样本；有效帧数过少的会被丢弃；验证集从足够长的视频里抽取。
 - 数据根目录和输出目录写在脚本顶部的 `ROOT`、`OUT`（`META_OUT` 环境变量可覆盖），请按你的数据位置修改。
 - pose 视频没有处理完时，处理完后再运行一次。
-- `build_meta_depth.py` 是 depth 控制的同类脚本。
+- `build_meta_depth.py` 基于已有的 v2 meta，样本、顺序和验证集都不变，只把 `control_file_path` 换成 depth 骨架视频，用于 depth 控制版本。
 
 ### 2.2 训练
 
@@ -116,7 +116,7 @@ python examples/wan2.2_fun/predict_v2v_control_ref_5b_streaming.py \
 | `--chunk-frames` / `--overlap-frames` | 16 / 4 | 每轮新帧数 / 复用的历史帧数 |
 | `--video-length` | 整段输入 | 最多输出的新帧数 |
 | `--sample-size` | 704 1280 | 高、宽 |
-| `--num-inference-steps` | 脚本内默认值 | 去噪步数 |
+| `--num-inference-steps` | 50 | 去噪步数 |
 | `--fps` | 24 | 输出帧率 |
 | `--save-path` | 脚本内默认值 | 输出目录 |
 
@@ -128,8 +128,8 @@ python examples/wan2.2_fun/predict_v2v_control_ref_5b_streaming.py \
 | --- | --- |
 | `predict_v2v_control_ref_streaming.py` | A14B 版本的 streaming。`scripts/wan2.2_fun/test_streaming_srun.sh` 是对应的 Slurm 启动脚本 |
 | `predict_v2v_control_ref_5b_streaming_fewstep.py` | 5B + DMD 4 步 LoRA 的少步 streaming，说明见 [README_streaming_fewstep.md](examples/wan2.2_fun/README_streaming_fewstep.md) |
-| `overlay_pose_on_stream.py`（`scripts/`） | 把 pose 叠加到 streaming 输出上，便于对比 |
-| `test_vae_reconstruction.py` | 检查 VAE 重建质量 |
+| `overlay_pose_on_stream.py`（`scripts/`） | 把 pose 叠加到生成的 `stream.mp4` 上，检查骨架是否对齐（仅 CPU） |
+| `test_vae_reconstruction.py` | 不经过扩散，让图片直接过 5B 和 A14B 的 VAE 做重建 |
 
 少步版本使用的 4 步 LoRA 是作者在原版 Wan2.2-TI2V-5B 上验证的，迁移到 Fun-Control 属于实验性用法，不保证 pose 跟随和画质，详见其 README。
 
