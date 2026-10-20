@@ -86,6 +86,35 @@ sbatch scripts/wan2.2_fun/vimogen_lora/train.sbatch      # 4 卡，默认 2 天
 - 验证视频（左到右：pose、生成结果、GT）：`samples/vimogen_val/{baseline,step-N}/`。
 - 验证由 `validate_watch.py` 完成，会按 GPU 数量切分验证样本并行跑。
 
+### 2.4 前景（人物）+ 背景 双 reference 版本
+
+上面的版本用**一张 reference 图**做条件。这个版本把它换成两个条件：**前景人物**和**背景图**，仍然只训练 LoRA。
+
+| 项 | 说明 |
+| --- | --- |
+| 数据 | `ViMoGen-person-sam2/{subset}/{id}.mp4/`：每个视频 5 个随机帧，各有 `foreground/`（人以外填白）、`background/`（人的位置是白色空洞）、`masks/`、`frames.jsonl` |
+| 采样 | 训练时前景和背景在**同一个视频内独立随机**各抽一帧（可同帧也可不同帧，和目标 clip 不需要对齐） |
+| 特征提取 | 前景用原来的 `ref_conv`，背景用新增的 `ref_conv_bg`（初始权重拷贝自 `ref_conv`）；两路 token 前置到序列，机制和单 reference 相同 |
+| 位置编码 | 两路 token 共用 RoPE 时间位置 0，视频帧的位置不变（只改时间维频率表，没有改 `rope_apply`） |
+| LoRA | rank 256 / alpha 256，目标层 `q,k,v,o,ffn.0,ffn.2,ref_conv,ref_conv_bg`：两个 conv 各有一个 LoRA，所以交付物仍然只有一个 LoRA 文件 |
+| 首帧条件 | 去掉了对齐的首帧 conv-in 通道（恒为 0）；`--add_inpaint_info` 保留，streaming 的历史帧靠它注入 |
+| 条件丢弃 | `--ref_drop_prob 0.1`，前景、背景各自独立置零，推理时可以只给其中一个 |
+
+```bash
+# 1. 生成元数据（CPU）：只保留人物 mask 非空的帧，输出到 ViMoGen-lora-meta-fgbg-v1/
+python scripts/wan2.2_fun/vimogen_lora_fgbg/build_meta_fgbg.py
+
+# 2. 训练（Slurm，4 卡，训练一段 → 验证一次，和 2.3 相同）
+sbatch scripts/wan2.2_fun/vimogen_lora_fgbg/train.sbatch
+# 或直接：MAX_STEPS=3000 NUM_GPU=4 bash scripts/wan2.2_fun/vimogen_lora_fgbg/train.sh
+```
+
+- 配置文件是 `config/wan2.2/wan_civitai_5b_fgbg.yaml`，和 `wan_civitai_5b.yaml` 只差 `add_ref_conv_bg: true`，基座模型目录不用改。
+- 训练脚本新增参数：`--ref_mode {single,fgbg}`（默认 `single`，原行为不变）、`--ref_drop_prob`。`fgbg` 要求同时开 `--add_full_ref_image_in_self_attention`、`--use_peft_lora`，并且 `--target_name` 里包含 `ref_conv,ref_conv_bg`。
+- 输出：`models/Wan2.2-Fun-5B-Control-ViMoGen-FGBG-LoRA/lora_step_N.safetensors`，验证视频在 `samples/vimogen_fgbg_val/`。
+- `merge_lora` 已支持 2×2 核的 conv LoRA（`videox_fun/utils/lora_utils.py`）。
+- 背景图里人的位置是白色空洞，推理时建议给同样处理过的背景。
+
 ## 3. Streaming inference
 
 ### 3.1 工作方式
@@ -113,7 +142,9 @@ python examples/wan2.2_fun/predict_v2v_control_ref_5b_streaming.py \
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
 | `--control-video` | 脚本内默认值 | pose 视频，完整流式处理 |
-| `--ref-image` | 脚本内默认值 | 参考图 |
+| `--ref-image`（别名 `--fg-image`） | 脚本内默认值 | 参考图；前景/背景版本里是前景人物 |
+| `--bg-image` | 无 | 背景图，仅前景/背景版本使用 |
+| `--config-path` | `wan_civitai_5b.yaml` | 前景/背景版本用 `config/wan2.2/wan_civitai_5b_fgbg.yaml` |
 | `--lora-path` / `--lora-weight` | 无 / 1.0 | 不传则使用基座模型 |
 | `--chunk-frames` / `--overlap-frames` | 16 / 4 | 每轮新帧数 / 复用的历史帧数 |
 | `--video-length` | 整段输入 | 最多输出的新帧数 |
@@ -140,6 +171,7 @@ python examples/wan2.2_fun/predict_v2v_control_ref_5b_streaming.py \
 ```text
 scripts/wan2.2_fun/train_control_lora.py     训练入口（含参考图增强和 peft 续训）
 scripts/wan2.2_fun/vimogen_lora/             数据、训练、验证脚本
+scripts/wan2.2_fun/vimogen_lora_fgbg/        前景 + 背景双 reference 版本的数据、训练、验证脚本
 examples/wan2.2_fun/*streaming*.py           streaming 推理
 videox_fun/pipeline/pipeline_wan2_2_fun_control.py   支持 history_frames 的 pipeline
 ```

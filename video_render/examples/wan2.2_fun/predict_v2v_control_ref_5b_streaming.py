@@ -146,6 +146,8 @@ start_image             = None
 end_image               = None
 # ref_image               = "asset/6.png"
 ref_image = "asset/synthetic_man_red.png"
+# Second reference (background); only used when the transformer has `add_ref_conv_bg` (see config_path).
+bg_image = None
 # ref_image = "asset/trump.png"
 
 
@@ -238,7 +240,11 @@ def parse_args(argv=None, parser=None):
     parser.add_argument('--overlap-frames', type=int, default=4, help='Real output frames reused as history')
     parser.add_argument('--video-length', type=int, default=video_length, help='Maximum output frames; default: entire input')
     parser.add_argument('--control-video', default=control_video)
-    parser.add_argument('--ref-image', default=ref_image)
+    parser.add_argument('--ref-image', '--fg-image', dest='ref_image', default=ref_image,
+                        help='Reference image; with a foreground/background model (--config-path ..._fgbg.yaml) the foreground (person)')
+    parser.add_argument('--bg-image', default=bg_image, help='Background reference image (foreground/background model only)')
+    parser.add_argument('--config-path', default=config_path,
+                        help='e.g. config/wan2.2/wan_civitai_5b_fgbg.yaml for a LoRA trained with a foreground + background reference')
     parser.add_argument('--save-path', default=save_path)
     parser.add_argument('--num-inference-steps', type=int, default=num_inference_steps)
     parser.add_argument('--sample-size', nargs=2, type=int, default=sample_size, metavar=('HEIGHT', 'WIDTH'))
@@ -280,6 +286,7 @@ def run_stream(pipeline, vae, device, generator, boundary, coefficients, args):
             with open(os.path.join(run_dir, 'run_config.json'), 'w') as handle:
                 json.dump(args.run_metadata, handle, indent=2, ensure_ascii=False)
     reference = get_image_latent(ref_image, sample_size=sample_size) if ref_image else None
+    reference_bg = get_image_latent(bg_image, sample_size=sample_size) if bg_image else None
     history_video = history_pose = None
     emitted = 0
     writer = log = None
@@ -312,7 +319,7 @@ def run_stream(pipeline, vae, device, generator, boundary, coefficients, args):
                     height=sample_size[0], width=sample_size[1], generator=generator,
                     guidance_scale=guidance_scale, num_inference_steps=num_inference_steps,
                     video=video, mask_video=mask, control_video=control,
-                    ref_image=reference, history_frames=prefix, boundary=boundary, shift=shift,
+                    ref_image=reference, ref_image_bg=reference_bg, history_frames=prefix, boundary=boundary, shift=shift,
                 ).videos
             sync()
             inference_seconds = time.perf_counter() - inference_start

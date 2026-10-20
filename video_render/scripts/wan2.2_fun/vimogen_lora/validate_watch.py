@@ -36,6 +36,8 @@ p.add_argument("--ckpt", default=None)
 p.add_argument("--shard", type=int, default=0)
 p.add_argument("--num_shards", type=int, default=1)
 p.add_argument("--once", action="store_true", help="evaluate baseline + latest checkpoint then exit")
+p.add_argument("--fgbg", action="store_true", help="foreground + background reference model: use `fg_image` / `bg_image` of the val json "
+                                                    "(pair with --config_path config/wan2.2/wan_civitai_5b_fgbg.yaml)")
 args = p.parse_args()
 
 NEG = "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
@@ -72,7 +74,8 @@ def evaluate(tag, lora_path):
     transformer.load_state_dict(base_sd)
     if lora_path:
         merge_lora(pipeline, lora_path, args.lora_weight, device=device, dtype=dtype)
-    index = [dict(name=f"{c['subset']}_{c['id']}", prompt=c["text"], ref_image=c["ref_image"], pose=c["control_file_path"], rgb=c["file_path"]) for c in cases]
+    index = [dict(name=f"{c['subset']}_{c['id']}", prompt=c["text"], ref_image=c["fg_image"] if args.fgbg else c["ref_image"],
+                  bg_image=c["bg_image"] if args.fgbg else None, pose=c["control_file_path"], rgb=c["file_path"]) for c in cases]
     if args.shard == 0:
         json.dump(index, open(os.path.join(out, "index.json"), "w"), ensure_ascii=False, indent=1)
     for c in cases[args.shard::args.num_shards]:
@@ -80,7 +83,8 @@ def evaluate(tag, lora_path):
         dst = os.path.join(out, name + ".mp4")
         if os.path.exists(dst):
             continue
-        ref = Image.open(c["ref_image"]).convert("RGB")
+        ref = Image.open(c["fg_image"] if args.fgbg else c["ref_image"]).convert("RGB")
+        bg = Image.open(c["bg_image"]).convert("RGB") if args.fgbg else None
         h, w = size_for(*ref.size)
         idx = c["frame_indices"]
         nf = len(idx)
@@ -92,7 +96,9 @@ def evaluate(tag, lora_path):
             sample = pipeline(c["text"], num_frames=nf, negative_prompt=NEG, height=h, width=w, generator=gen,
                               guidance_scale=args.guidance, num_inference_steps=args.steps, video=inpaint_video,
                               mask_video=inpaint_mask, control_video=pose, control_camera_video=None,
-                              ref_image=get_image_latent(ref, sample_size=[h, w]), boundary=boundary, shift=5).videos
+                              ref_image=get_image_latent(ref, sample_size=[h, w]),
+                              **(dict(ref_image_bg=get_image_latent(bg, sample_size=[h, w])) if args.fgbg else {}),
+                              boundary=boundary, shift=5).videos
         # panel: pose | generated | ground truth
         save_videos_grid(torch.cat([pose, sample.cpu().float(), gt], dim=4), dst, fps=FPS)
         print(f"[{tag}] saved {dst}", flush=True)

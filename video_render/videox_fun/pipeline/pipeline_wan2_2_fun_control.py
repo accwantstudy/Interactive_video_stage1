@@ -514,6 +514,7 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
         control_camera_video: Union[torch.FloatTensor] = None,
         start_image: Union[torch.FloatTensor] = None,
         ref_image: Union[torch.FloatTensor] = None,
+        ref_image_bg: Union[torch.FloatTensor] = None,
         num_frames: int = 49,
         num_inference_steps: int = 50,
         timesteps: Optional[List[int]] = None,
@@ -788,6 +789,33 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
             else:
                 ref_image_latentes = None
 
+        # Second (background) reference; `ref_image` is then the foreground (person). Zeros when omitted.
+        if self.transformer.config.get("add_ref_conv_bg", False):
+            if ref_image_bg is not None:
+                video_length = ref_image_bg.shape[2]
+                ref_image_bg = self.image_processor.preprocess(rearrange(ref_image_bg, "b c f h w -> (b f) c h w"), height=height, width=width)
+                ref_image_bg = ref_image_bg.to(dtype=torch.float32)
+                ref_image_bg = rearrange(ref_image_bg, "(b f) c h w -> b c f h w", f=video_length)
+
+                ref_image_bg_latentes = self.prepare_control_latents(
+                    None,
+                    ref_image_bg,
+                    batch_size,
+                    height,
+                    width,
+                    weight_dtype,
+                    device,
+                    generator,
+                    do_classifier_free_guidance
+                )[1]
+                ref_image_bg_latentes = ref_image_bg_latentes[:, :, 0]
+            else:
+                ref_image_bg_latentes = torch.zeros_like(latents)[:, :, 0]
+        else:
+            if ref_image_bg is not None:
+                raise ValueError("The add_ref_conv_bg is False, but ref_image_bg is not None")
+            ref_image_bg_latentes = None
+
         if comfyui_progressbar:
             pbar.update(1)
 
@@ -844,6 +872,13 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
                 else:
                     full_ref = None
 
+                if ref_image_bg_latentes is not None:
+                    full_ref_bg = (
+                        torch.cat([ref_image_bg_latentes] * 2) if do_classifier_free_guidance else ref_image_bg_latentes
+                    ).to(device, weight_dtype)
+                else:
+                    full_ref_bg = None
+
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 if self.vae.spatial_compression_ratio >= 16 and init_video is not None:
                     temp_ts = ((mask[0][0][:, ::2, ::2]) * t).flatten()
@@ -874,6 +909,7 @@ class Wan2_2FunControlPipeline(DiffusionPipeline):
                         y=control_latents_input,
                         y_camera=control_camera_latents_input, 
                         full_ref=full_ref,
+                        **({"full_ref_bg": full_ref_bg} if full_ref_bg is not None else {}),
                     )
 
                 # perform guidance

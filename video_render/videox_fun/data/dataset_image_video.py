@@ -503,6 +503,7 @@ class ImageVideoControlDataset(Dataset):
         enable_subject_info=False,
         padding_subject_info=True,
         return_file_name=False,
+        enable_fgbg_ref=False,
     ):
         # Loading annotations from files
         print(f"loading annotations from {ann_path} ...")
@@ -540,6 +541,9 @@ class ImageVideoControlDataset(Dataset):
         self.enable_subject_info = enable_subject_info
         self.padding_subject_info = padding_subject_info
         self.return_file_name = return_file_name
+        # Foreground (person) / background reference images, one of each drawn independently per sample from the
+        # `fg_files` / `bg_files` lists of the annotation (any frame of the same video).
+        self.enable_fgbg_ref = enable_fgbg_ref
 
         self.video_length_drop_start = video_length_drop_start
         self.video_length_drop_end = video_length_drop_end
@@ -786,6 +790,17 @@ class ImageVideoControlDataset(Dataset):
     def __len__(self):
         return self.length
 
+    def _load_fgbg_ref(self, data_info, pixel_values):
+        """Randomly pick a foreground and a background reference (independently) and resize like the video frames."""
+        refs = []
+        for key in ("fg_files", "bg_files"):
+            image = Image.open(random.choice(data_info[key])).convert('RGB')
+            video_hw = pixel_values.shape[1:3] if self.enable_bucket else pixel_values.shape[-2:]
+            if (image.height, image.width) != tuple(video_hw):
+                image = image.resize((video_hw[1], video_hw[0]), Image.BICUBIC)
+            refs.append(np.array(image))
+        return refs
+
     def __getitem__(self, idx):
         """Get a sample with retry on failure."""
         data_info = self.dataset[idx % len(self.dataset)]
@@ -809,6 +824,11 @@ class ImageVideoControlDataset(Dataset):
 
                 if self.enable_camera_info:
                     sample["control_camera_values"] = control_camera_values
+
+                if self.enable_fgbg_ref:
+                    sample["fg_pixel_values"], sample["bg_pixel_values"] = self._load_fgbg_ref(
+                        self.dataset[idx % len(self.dataset)], pixel_values
+                    )
                 
                 if self.return_file_name:
                     sample["file_name"] = os.path.basename(data_info['file_path'])

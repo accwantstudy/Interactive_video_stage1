@@ -701,6 +701,16 @@ def parse_args():
         help="Probability of randomly scaling/translating/cropping the reference frame (only for clip_idx != 0, i.e. the full_ref path "
              "used at inference). 0 disables it; the target video and the pose are never touched.",
     )
+    parser.add_argument(
+        "--ref_mode", type=str, default="single", choices=["single", "fgbg"],
+        help="`single`: one reference frame taken from the clip (default). `fgbg`: a foreground (person) and a background reference "
+             "image, drawn independently from `fg_files` / `bg_files` of the same video; needs a transformer with `add_ref_conv_bg`. "
+             "The aligned conv-in reference channel is then always zero.",
+    )
+    parser.add_argument(
+        "--ref_drop_prob", type=float, default=0.1,
+        help="Probability of zeroing the full_ref input (fgbg: each of foreground / background independently).",
+    )
     parser.add_argument("--ref_aug_scale_min", type=float, default=0.7)
     parser.add_argument("--ref_aug_scale_max", type=float, default=1.3)
     parser.add_argument("--ref_aug_max_shift", type=float, default=0.2, help="Max shift as a fraction of the half image size.")
@@ -758,6 +768,13 @@ def parse_args():
     # default to using the same revision for the non-ema model if not specified
     if args.non_ema_revision is None:
         args.non_ema_revision = args.revision
+
+    if args.ref_mode == "fgbg":
+        assert args.train_mode != "control", "--ref_mode fgbg needs a reference mode (control_ref / control_camera_ref)"
+        assert args.add_full_ref_image_in_self_attention, "--ref_mode fgbg needs --add_full_ref_image_in_self_attention"
+        assert args.use_peft_lora, "--ref_mode fgbg needs --use_peft_lora"
+        assert "ref_conv" in args.target_name.split(",") and "ref_conv_bg" in args.target_name.split(","), \
+            "--ref_mode fgbg needs `ref_conv,ref_conv_bg` in --target_name so both reference convs get a LoRA"
 
     return args
 
@@ -1127,7 +1144,8 @@ def main():
         video_repeat=args.video_repeat, 
         image_sample_size=args.image_sample_size,
         enable_bucket=args.enable_bucket, 
-        enable_camera_info=args.train_mode == "control_camera_ref"
+        enable_camera_info=args.train_mode == "control_camera_ref",
+        enable_fgbg_ref=args.ref_mode == "fgbg",
     )
 
     def worker_init_fn(_seed):
@@ -1211,6 +1229,8 @@ def main():
                 new_examples["ref_pixel_values"] = []
                 new_examples["clip_pixel_values"] = []
                 new_examples["clip_idx"] = []
+            if args.ref_mode == "fgbg":
+                new_examples["bg_pixel_values"] = []
             # Used in Control Camera Ref Mode
             if args.train_mode == "control_camera_ref":
                 new_examples["control_camera_values"] = []
@@ -1385,7 +1405,10 @@ def main():
                 new_examples["text"].append(example["text"])
 
                 if args.train_mode != "control":
-                    if args.control_ref_image == "first_frame":
+                    if args.ref_mode == "fgbg":
+                        # Not aligned with any frame of the clip: clip_idx != 0 keeps the conv-in reference channel zero.
+                        clip_index = 1
+                    elif args.control_ref_image == "first_frame":
                         clip_index = 0
                     else:
                         def _create_special_list(length):
@@ -1401,7 +1424,14 @@ def main():
                         clip_index = np.random.choice(list(range(len(new_examples["pixel_values"][-1]))), p = number_list_prob)
                     new_examples["clip_idx"].append(clip_index)
 
-                    ref_pixel_values = new_examples["pixel_values"][-1][clip_index].unsqueeze(0)
+                    if args.ref_mode == "fgbg":
+                        def _to_ref(image):
+                            image = torch.from_numpy(image).permute(2, 0, 1)[None].float() / 255.
+                            return transform(image)  # (1, C, H, W), same resize / crop / normalize as the video frames
+                        ref_pixel_values = _to_ref(example["fg_pixel_values"])
+                        bg_pixel_values = _to_ref(example["bg_pixel_values"])
+                    else:
+                        ref_pixel_values = new_examples["pixel_values"][-1][clip_index].unsqueeze(0)
                     # clip_index == 0 feeds the aligned conv-in path (full_ref is zeroed), so leave it alone; only augment the
                     # full_ref path, which is the one used at inference with an arbitrary reference image.
                     if args.ref_aug_prob > 0 and clip_index != 0 and np.random.rand() < args.ref_aug_prob:
@@ -1409,8 +1439,14 @@ def main():
                             ref_pixel_values[0], args.ref_aug_scale_min, args.ref_aug_scale_max, args.ref_aug_max_shift
                         ).unsqueeze(0)
                     new_examples["ref_pixel_values"].append(ref_pixel_values)
+                    if args.ref_mode == "fgbg":
+                        if args.ref_aug_prob > 0 and np.random.rand() < args.ref_aug_prob:
+                            bg_pixel_values = random_scale_shift_ref(
+                                bg_pixel_values[0], args.ref_aug_scale_min, args.ref_aug_scale_max, args.ref_aug_max_shift
+                            ).unsqueeze(0)
+                        new_examples["bg_pixel_values"].append(bg_pixel_values)
 
-                    clip_pixel_values = new_examples["pixel_values"][-1][clip_index].permute(1, 2, 0).contiguous()
+                    clip_pixel_values = new_examples["pixel_values"][-1][0 if args.ref_mode == "fgbg" else clip_index].permute(1, 2, 0).contiguous()
                     clip_pixel_values = (clip_pixel_values * 0.5 + 0.5) * 255
                     new_examples["clip_pixel_values"].append(clip_pixel_values)
 
@@ -1427,6 +1463,8 @@ def main():
             new_examples["control_pixel_values"] = torch.stack([example[:batch_video_length] for example in new_examples["control_pixel_values"]])
             if args.train_mode != "control":
                 new_examples["ref_pixel_values"] = torch.stack([example for example in new_examples["ref_pixel_values"]])
+                if args.ref_mode == "fgbg":
+                    new_examples["bg_pixel_values"] = torch.stack([example for example in new_examples["bg_pixel_values"]])
                 new_examples["clip_pixel_values"] = torch.stack([example for example in new_examples["clip_pixel_values"]])
                 new_examples["clip_idx"] = torch.tensor(new_examples["clip_idx"])
             if args.train_mode == "control_camera_ref":
@@ -1722,6 +1760,11 @@ def main():
                         ref_pixel_value = ref_pixel_value[None, ...]
                         gif_name = '-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_step}-{idx}'
                         save_videos_grid(ref_pixel_value, f"{args.output_dir}/sanity_check/{gif_name[:10]}_ref.gif", rescale=True)
+                    if args.ref_mode == "fgbg":
+                        bg_pixel_values = rearrange(batch["bg_pixel_values"].cpu(), "b f c h w -> b c f h w")
+                        for idx, (bg_pixel_value, text) in enumerate(zip(bg_pixel_values, texts)):
+                            gif_name = '-'.join(text.replace('/', '').split()[:10]) if not text == '' else f'{global_step}-{idx}'
+                            save_videos_grid(bg_pixel_value[None, ...], f"{args.output_dir}/sanity_check/{gif_name[:10]}_bg.gif", rescale=True)
 
                 if args.add_inpaint_info:
                     clip_pixel_values, mask_pixel_values, texts = batch['clip_pixel_values'].cpu(), batch['mask_pixel_values'].cpu(), batch['text']
@@ -1763,14 +1806,19 @@ def main():
                 
                 if args.train_mode != "control":
                     ref_pixel_values = batch["ref_pixel_values"].to(weight_dtype)
+                    bg_pixel_values = batch["bg_pixel_values"].to(weight_dtype) if args.ref_mode == "fgbg" else None
                     clip_idx = batch["clip_idx"]
                     # Increase the batch size when the length of the latent sequence of the current sample is small
                     if args.auto_tile_batch_size and args.training_with_video_token_length and not zero_stage == 3:
                         if args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 16 >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]:
                             ref_pixel_values = torch.tile(ref_pixel_values, (4, 1, 1, 1, 1))
+                            if bg_pixel_values is not None:
+                                bg_pixel_values = torch.tile(bg_pixel_values, (4, 1, 1, 1, 1))
                             clip_idx = torch.tile(clip_idx, (4,))
                         elif args.video_sample_n_frames * args.token_sample_size * args.token_sample_size // 4 >= pixel_values.size()[1] * pixel_values.size()[3] * pixel_values.size()[4]:
                             ref_pixel_values = torch.tile(ref_pixel_values, (2, 1, 1, 1, 1))
+                            if bg_pixel_values is not None:
+                                bg_pixel_values = torch.tile(bg_pixel_values, (2, 1, 1, 1, 1))
                             clip_idx = torch.tile(clip_idx, (2,))
 
                 if args.add_inpaint_info:
@@ -1886,10 +1934,13 @@ def main():
                         control_camera_latents = control_camera_latents.view(control_camera_latents.shape[0], control_camera_latents.shape[1], control_camera_latents.shape[2] * 4, control_camera_latents.shape[4], control_camera_latents.shape[5])
                         control_camera_latents = control_camera_latents.transpose(1, 2)
                             
+                    full_ref_bg = None
                     if args.train_mode != "control":
                         ref_latents = _batch_encode_vae(ref_pixel_values)
                         if args.add_full_ref_image_in_self_attention:
                             full_ref = ref_latents[:, :, 0].clone()
+                        if args.ref_mode == "fgbg":
+                            full_ref_bg = _batch_encode_vae(bg_pixel_values)[:, :, 0].clone()
 
                         ref_latents_conv_in = torch.zeros_like(latents).to(ref_latents.device, ref_latents.dtype)
                         ref_latents_conv_in[:, :, :1] = ref_latents
@@ -1904,11 +1955,20 @@ def main():
 
                             if args.add_full_ref_image_in_self_attention:
                                 if rng is None:
-                                    zero_init_full_ref_conv_in = np.random.choice([0, 1], p = [0.90, 0.10])
+                                    zero_init_full_ref_conv_in = np.random.choice([0, 1], p = [1 - args.ref_drop_prob, args.ref_drop_prob])
                                 else:
-                                    zero_init_full_ref_conv_in = rng.choice([0, 1], p = [0.90, 0.10])
+                                    zero_init_full_ref_conv_in = rng.choice([0, 1], p = [1 - args.ref_drop_prob, args.ref_drop_prob])
                                 if clip_idx[bs_index] == 0 or zero_init_full_ref_conv_in:
                                     full_ref[bs_index] = full_ref[bs_index] * 0
+
+                                if full_ref_bg is not None:
+                                    # Independent of the foreground drop, so the model also sees (and can be sampled with) only one of them.
+                                    if rng is None:
+                                        zero_init_full_ref_bg = np.random.choice([0, 1], p = [1 - args.ref_drop_prob, args.ref_drop_prob])
+                                    else:
+                                        zero_init_full_ref_bg = rng.choice([0, 1], p = [1 - args.ref_drop_prob, args.ref_drop_prob])
+                                    if zero_init_full_ref_bg:
+                                        full_ref_bg[bs_index] = full_ref_bg[bs_index] * 0
 
                     if args.add_inpaint_info:
                         t2v_flag = [(_mask == 1).all() for _mask in mask]
@@ -2051,6 +2111,7 @@ def main():
                         y=control_latents,
                         y_camera=control_camera_latents if args.train_mode == "control_camera_ref" else None,
                         full_ref=full_ref if args.add_full_ref_image_in_self_attention else None,
+                        full_ref_bg=full_ref_bg,
                     )
                 
                 def custom_mse_loss(noise_pred, target, weighting=None, threshold=50):

@@ -616,6 +616,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         add_ref_conv=False,
         in_dim_ref_conv=16,
         cross_attn_type=None,
+        add_ref_conv_bg=False,
     ):
         r"""
         Initialize the diffusion model backbone.
@@ -742,6 +743,13 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         else:
             self.ref_conv = None
 
+        # Second reference branch (background). `ref_conv` then encodes the foreground (person) reference.
+        if add_ref_conv_bg:
+            assert add_ref_conv, "add_ref_conv_bg requires add_ref_conv"
+            self.ref_conv_bg = nn.Conv2d(in_dim_ref_conv, dim, kernel_size=patch_size[1:], stride=patch_size[1:])
+        else:
+            self.ref_conv_bg = None
+
         self.teacache = None
         self.cfg_skip_ratio = None
         self.current_steps = 0
@@ -864,6 +872,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         full_ref=None,
         subject_ref=None,
         cond_flag=True,
+        full_ref_bg=None,
     ):
         r"""
         Forward pass through the diffusion model
@@ -920,11 +929,25 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         # Flatten x
         x = [u.flatten(2).transpose(1, 2) for u in x]
 
-        # Add full reference frame (for fun control)
+        # Add full reference frame (for fun control). With `ref_conv_bg` and `full_ref_bg` there are two reference
+        # frames, foreground then background; they share RoPE temporal position 0 so the video positions are unchanged.
+        freqs = self.freqs
+        num_ref_frames, ref_token_length = 0, 0
         if self.ref_conv is not None and full_ref is not None:
             full_ref = self.ref_conv(full_ref).flatten(2).transpose(1, 2)
-            grid_sizes = torch.stack([torch.tensor([u[0] + 1, u[1], u[2]]) for u in grid_sizes]).to(grid_sizes.device)
-            seq_len += full_ref.size(1)
+            num_ref_frames = 1
+            if self.ref_conv_bg is not None and full_ref_bg is not None:
+                full_ref_bg = self.ref_conv_bg(full_ref_bg).flatten(2).transpose(1, 2)
+                full_ref = torch.cat([full_ref, full_ref_bg], dim=1)
+                num_ref_frames = 2
+                # Temporal frequency of frame index k (k >= 1) becomes that of k - 1: frame 0 (fg) and frame 1 (bg)
+                # both get position 0, and video frame j (grid index j + 2) gets position j + 1, as with a single ref.
+                temporal_dim = freqs.size(1) - 2 * (freqs.size(1) // 3)
+                freqs = freqs.clone()
+                freqs[1:, :temporal_dim] = self.freqs[:-1, :temporal_dim]
+            ref_token_length = full_ref.size(1)
+            grid_sizes = torch.stack([torch.tensor([u[0] + num_ref_frames, u[1], u[2]]) for u in grid_sizes]).to(grid_sizes.device)
+            seq_len += ref_token_length
             x = [torch.concat([_full_ref.unsqueeze(0), u], dim=1) for _full_ref, u in zip(full_ref, x)]
             if t.dim() != 1 and t.size(1) < seq_len:
                 pad_size = seq_len - t.size(1)
@@ -1042,7 +1065,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                             e0,
                             seq_lens,
                             grid_sizes,
-                            self.freqs,
+                            freqs,
                             context,
                             context_lens,
                             dtype,
@@ -1055,7 +1078,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                             e=e0,
                             seq_lens=seq_lens,
                             grid_sizes=grid_sizes,
-                            freqs=self.freqs,
+                            freqs=freqs,
                             context=context,
                             context_lens=context_lens,
                             dtype=dtype,
@@ -1076,7 +1099,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         e0,
                         seq_lens,
                         grid_sizes,
-                        self.freqs,
+                        freqs,
                         context,
                         context_lens,
                         dtype,
@@ -1089,7 +1112,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                         e=e0,
                         seq_lens=seq_lens,
                         grid_sizes=grid_sizes,
-                        freqs=self.freqs,
+                        freqs=freqs,
                         context=context,
                         context_lens=context_lens,
                         dtype=dtype,
@@ -1107,11 +1130,10 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         if self.sp_world_size > 1:
             x = self.all_gather(x, dim=1)
 
-        # Remove full reference frame from output
-        if self.ref_conv is not None and full_ref is not None:
-            full_ref_length = full_ref.size(1)
-            x = x[:, full_ref_length:]
-            grid_sizes = torch.stack([torch.tensor([u[0] - 1, u[1], u[2]]) for u in grid_sizes]).to(grid_sizes.device)
+        # Remove full reference frame(s) from output
+        if num_ref_frames > 0:
+            x = x[:, ref_token_length:]
+            grid_sizes = torch.stack([torch.tensor([u[0] - num_ref_frames, u[1], u[2]]) for u in grid_sizes]).to(grid_sizes.device)
 
         # Remove subject reference frames from output
         if subject_ref is not None:
@@ -1220,6 +1242,15 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
         
         return new_config
 
+    @staticmethod
+    def _init_ref_conv_bg_from_ref_conv(model_state_dict, state_dict):
+        """The background reference conv is new: start it from the pretrained (foreground) `ref_conv` weights."""
+        for suffix in ("weight", "bias"):
+            bg_key, fg_key = f"ref_conv_bg.{suffix}", f"ref_conv.{suffix}"
+            if bg_key in model_state_dict and bg_key not in state_dict and fg_key in state_dict:
+                state_dict[bg_key] = state_dict[fg_key].clone()
+                print(f"Initializing '{bg_key}' from '{fg_key}'.")
+
     @classmethod
     def from_pretrained(
         cls, pretrained_model_path, subfolder=None, transformer_additional_kwargs=None,
@@ -1289,6 +1320,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
                     raise FileNotFoundError(f"No weights found in {pretrained_model_path}")
 
                 model_state_dict = model.state_dict()
+                cls._init_ref_conv_bg_from_ref_conv(model_state_dict, state_dict)
                 if model_state_dict['patch_embedding.weight'].size() != state_dict['patch_embedding.weight'].size():
                     tmp_state_dict = torch.zeros(model_state_dict['patch_embedding.weight'].size(), dtype=torch_dtype, device=param_device)
                     tmp_state_dict[:, :state_dict['patch_embedding.weight'].size()[1], :, :] = state_dict['patch_embedding.weight'][:, :model_state_dict['patch_embedding.weight'].size()[1], :, :]
@@ -1419,6 +1451,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin, FromOriginalModelMixin):
             raise FileNotFoundError(f"No weights found in {pretrained_model_path}")
         
         model_state_dict = model.state_dict()
+        cls._init_ref_conv_bg_from_ref_conv(model_state_dict, state_dict)
         if model_state_dict['patch_embedding.weight'].size() != state_dict['patch_embedding.weight'].size():
             model_state_dict['patch_embedding.weight'][:, :state_dict['patch_embedding.weight'].size()[1], :, :] = state_dict['patch_embedding.weight'][:, :model_state_dict['patch_embedding.weight'].size()[1], :, :]
             model_state_dict['patch_embedding.weight'][:, state_dict['patch_embedding.weight'].size()[1]:, :, :] = 0
@@ -1482,6 +1515,7 @@ class Wan2_2Transformer3DModel(WanTransformer3DModel):
         downscale_factor_control_adapter=8,
         add_ref_conv=False,
         in_dim_ref_conv=16,
+        add_ref_conv_bg=False,
     ):
         r"""
         Initialize the diffusion model backbone.
@@ -1555,7 +1589,8 @@ class Wan2_2Transformer3DModel(WanTransformer3DModel):
             downscale_factor_control_adapter=downscale_factor_control_adapter,
             add_ref_conv=add_ref_conv,
             in_dim_ref_conv=in_dim_ref_conv,
-            cross_attn_type="cross_attn"
+            cross_attn_type="cross_attn",
+            add_ref_conv_bg=add_ref_conv_bg,
         )
         
         if hasattr(self, "img_emb"):

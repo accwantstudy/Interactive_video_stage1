@@ -572,9 +572,10 @@ def merge_lora(pipeline, lora_path, multiplier, device='cpu', dtype=torch.float3
             alpha = 1.0
 
         if len(weight_up.shape) == 4:
-            curr_layer.weight.data += multiplier * alpha * torch.mm(
-                weight_up.squeeze(3).squeeze(2), weight_down.squeeze(3).squeeze(2)
-            ).unsqueeze(2).unsqueeze(3)
+            # lora_up: (out_dim, lora_dim, 1, 1); lora_down: (lora_dim, in_dim, kH, kW), kH/kW may be > 1 (e.g. a patch conv)
+            up_2d = weight_up.reshape(weight_up.shape[0], weight_up.shape[1])
+            down_2d = weight_down.reshape(weight_down.shape[0], -1)
+            curr_layer.weight.data += multiplier * alpha * torch.mm(up_2d, down_2d).reshape(curr_layer.weight.data.shape)
         elif len(weight_up.shape) == 5:
             # lora_up: (out_dim, lora_dim, 1, 1, 1) → (out_dim, lora_dim)
             # lora_down: (lora_dim, in_dim, kD, kH, kW) → (lora_dim, in_dim*kD*kH*kW)
@@ -744,9 +745,10 @@ def unmerge_lora(pipeline, lora_path, multiplier=1, device="cpu", dtype=torch.fl
             alpha = 1.0
 
         if len(weight_up.shape) == 4:
-            curr_layer.weight.data -= multiplier * alpha * torch.mm(
-                weight_up.squeeze(3).squeeze(2), weight_down.squeeze(3).squeeze(2)
-            ).unsqueeze(2).unsqueeze(3)
+            # lora_up: (out_dim, lora_dim, 1, 1); lora_down: (lora_dim, in_dim, kH, kW), kH/kW may be > 1 (e.g. a patch conv)
+            up_2d = weight_up.reshape(weight_up.shape[0], weight_up.shape[1])
+            down_2d = weight_down.reshape(weight_down.shape[0], -1)
+            curr_layer.weight.data -= multiplier * alpha * torch.mm(up_2d, down_2d).reshape(curr_layer.weight.data.shape)
         elif len(weight_up.shape) == 5:
             # lora_up: (out_dim, lora_dim, 1, 1, 1) → (out_dim, lora_dim)
             # lora_down: (lora_dim, in_dim, kD, kH, kW) → (lora_dim, in_dim*kD*kH*kW)
