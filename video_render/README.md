@@ -7,6 +7,10 @@
 
 > 仓库里只有代码，不含图片、视频、模型权重和数据。上游 VideoX-Fun 的原版说明放在本文最后（[跳转](#videox-fun-原版说明)）。
 
+<p align="center">
+  <img src="./Video-Rendering-Pipeline.png" width="100%">
+</p>
+
 ## 1. 环境
 
 ```bash
